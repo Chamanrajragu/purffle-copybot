@@ -1,0 +1,32 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+myenv/
+.venv/
+*.egg-info/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Database & logs
+*.db
+*.log
+
+# Cache (large backtest files)
+*_cache*.json
+
+# Output
+stdout*.txt
+stderr*.txt
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
