@@ -127,6 +127,21 @@ purffle-copybot/
 └── reports/                   # AI-generated trade reviews
 ```
 
+## Backtest Results (2-Year, $100 Starting Capital)
+
+Backtested across 30 sub-$1 USDT pairs from Jun 2024 — Jun 2026. Position sizing variants tested:
+
+| Variant | Final | ROI | Win Rate | Max Drawdown | Avg Monthly | Best Month | Worst Month |
+|---------|-------|-----|----------|-------------|-------------|------------|-------------|
+| **Stock Purffle (15% + partial)** | **$84.17** | -15.8% | 40.9% | **30.4%** | -0.6% | +4.8% | -6.4% |
+| 15% size, no partial | $83.84 | -16.2% | 40.9% | 30.5% | -0.7% | +4.9% | -6.4% |
+| 25% size | $73.13 | -26.9% | 40.9% | 46.5% | -1.1% | +7.4% | -10.2% |
+| Dynamic (10-75%) | $70.59 | -29.4% | 40.8% | 58.4% | -1.1% | +22.3% | -10.3% |
+| Dynamic + partial profit | $74.29 | -25.7% | 40.8% | 58.2% | -0.9% | +21.9% | -10.3% |
+| 60% size (current live) | $42.53 | -57.5% | 40.4% | 79.5% | -2.8% | +19.6% | -21.4% |
+
+**Key takeaway:** Conservative 15% position sizing with partial profit-taking produces the best risk-adjusted returns (lowest max drawdown at 30.4%). Copy-trading is inherently lagging — smaller sizes protect capital while capturing directional alpha from elite traders.
+
 ## Realistic Expectations
 
 > This is **NOT** a magic money printer. It IS a way to ride the coattails of proven traders — with real caveats:

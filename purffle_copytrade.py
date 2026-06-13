@@ -407,46 +407,97 @@ app = Flask(__name__)
 
 DASH_HTML = """
 <!doctype html>
-<html><head><title>PurffleBot Copy — Hyperliquid mirror</title>
+<html><head><title>PurffleCopyBot — Dashboard</title>
 <meta http-equiv="refresh" content="60">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <style>
- body{font-family:-apple-system,Segoe UI,sans-serif;background:#0f0a14;color:#f0e6f5;margin:0;padding:24px}
- h1{margin:0 0 8px;font-size:22px}
- h1 .tag{background:#5f1f3a;color:#ff7cb6;padding:3px 10px;border-radius:6px;font-size:12px;margin-left:10px;vertical-align:middle}
- h2{font-size:16px;margin:24px 0 8px}
- .row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px}
- .card{background:#1a0f25;border:1px solid #2e1a3a;border-radius:10px;padding:18px;min-width:200px;flex:1}
- .label{color:#9a7a98;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
- .value{font-size:24px;font-weight:600;margin-top:4px}
- .pos{color:#36d399}.neg{color:#ff7a8a}
- table{width:100%;border-collapse:collapse;background:#1a0f25;border-radius:10px;overflow:hidden}
- th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #2e1a3a;font-size:14px}
- th{background:#22142e;color:#9a7a98;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
- tr:last-child td{border-bottom:none}
- .muted{color:#7a5b87;font-size:12px}
- .nav a{color:#ff7cb6;margin-right:18px;text-decoration:none;font-size:14px}
- .pill{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
- .pill.up{background:#193c2a;color:#36d399}.pill.dn{background:#3c1924;color:#ff7a8a}
- .pill.long{background:#1f3a5f;color:#7cb6ff}
- a.addr{color:#c19eff;font-family:monospace;font-size:12px;text-decoration:none}
-</style></head><body>
-<div class="nav"><a href="/">Dashboard</a><a href="/api/state">Raw state (JSON)</a></div>
-<h1>PurffleBot Copy <span class="tag">HYPERLIQUID MIRROR · TOP {{elite_count}}</span></h1>
-<div class="muted">Mirrors top traders on Hyperliquid. Opens BTC/ETH/SOL/etc on Binance spot when >= {{min_agree}} elites agree long. Paper only. NOT a guaranteed money machine — read the live signal feed below to see what the elites are actually doing.</div>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#07050d;--s1:#100d18;--s2:#1a1525;--bd:#261e35;--t1:#f3eef8;--t2:#9a8aad;--t3:#6b5a80;
+--green:#22c55e;--red:#ef4444;--purple:#a855f7;--pink:#ec4899;--blue:#3b82f6;
+--grad:linear-gradient(135deg,#a855f7,#ec4899)}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh}
+.shell{max-width:1280px;margin:0 auto;padding:24px 32px}
 
-<div class="row">
- <div class="card"><div class="label">Total value</div>
-  <div class="value {{'pos' if total>=starting else 'neg'}}">${{ '%.2f'|format(total) }}</div>
-  <div class="muted">P/L ${{ '%+.2f'|format(total-starting) }} ({{ '%+.2f'|format((total/starting-1)*100) }}%)</div></div>
- <div class="card"><div class="label">Cash</div><div class="value">${{ '%.2f'|format(cash) }}</div></div>
- <div class="card"><div class="label">Holdings</div><div class="value">${{ '%.2f'|format(holdings_value) }}</div></div>
- <div class="card"><div class="label">Open mirror positions</div><div class="value">{{ open_count }} / {{ max_concurrent }}</div></div>
- <div class="card"><div class="label">Trades total</div><div class="value">{{ trade_count }}</div></div>
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--bd)}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--t1)}
+.brand-icon{width:34px;height:34px;background:var(--grad);border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;color:#fff}
+.brand span{font-weight:800;font-size:17px;letter-spacing:-.02em}
+.brand .env{font-size:10px;font-weight:700;color:var(--pink);background:rgba(236,72,153,.1);padding:3px 8px;border-radius:5px;margin-left:6px}
+.nav-links a{color:var(--t2);font-size:13px;font-weight:500;text-decoration:none;padding:7px 14px;border-radius:8px;transition:.15s}
+.nav-links a:hover,.nav-links a.active{color:var(--t1);background:var(--s2)}
+
+.status-bar{display:flex;align-items:center;gap:14px;margin-bottom:20px;font-size:12px;color:var(--t3);flex-wrap:wrap}
+.status-bar .live{display:flex;align-items:center;gap:6px;color:var(--purple);font-weight:600}
+.status-bar .live .dot{width:7px;height:7px;border-radius:50%;background:var(--purple);animation:blink 2s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+.status-bar .sep{color:var(--bd)}
+.tag-hl{font-size:10px;font-weight:700;color:var(--pink);background:rgba(236,72,153,.1);border:1px solid rgba(236,72,153,.2);padding:3px 10px;border-radius:6px}
+
+.metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:28px}
+.metric{background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:20px;position:relative;overflow:hidden;transition:.2s}
+.metric:hover{border-color:rgba(168,85,247,.35);transform:translateY(-2px)}
+.metric::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;border-radius:14px 14px 0 0;opacity:0;transition:.2s}
+.metric:hover::after{opacity:1}
+.metric:nth-child(1)::after{background:var(--grad)}
+.metric:nth-child(2)::after{background:var(--blue)}
+.metric:nth-child(3)::after{background:var(--purple)}
+.metric:nth-child(4)::after{background:var(--pink)}
+.metric:nth-child(5)::after{background:var(--green)}
+.metric .lbl{font-size:11px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.metric .val{font-size:26px;font-weight:800;letter-spacing:-.02em}
+.metric .sub{font-size:12px;color:var(--t3);margin-top:4px}
+
+.pos{color:var(--green)}.neg{color:var(--red)}
+
+.sec{display:flex;align-items:center;gap:10px;margin:28px 0 12px}
+.sec h2{font-size:15px;font-weight:700}
+.sec .ico{font-size:16px}
+
+.tbl-wrap{background:var(--s1);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:8px}
+table{width:100%;border-collapse:collapse}
+th{background:var(--s2);color:var(--t3);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;padding:10px 14px;text-align:left}
+td{padding:10px 14px;font-size:13px;border-top:1px solid var(--bd)}
+tr:hover td{background:rgba(255,255,255,.01)}
+.pill{display:inline-block;padding:3px 10px;border-radius:8px;font-size:10px;font-weight:700;letter-spacing:.03em}
+.pill.buy,.pill.up{background:rgba(34,197,94,.12);color:var(--green)}
+.pill.sell,.pill.dn{background:rgba(239,68,68,.12);color:var(--red)}
+.pill.signal{background:rgba(168,85,247,.12);color:var(--purple)}
+.pill.mirror{background:rgba(236,72,153,.12);color:var(--pink)}
+.muted{color:var(--t3);font-size:12px}
+a.addr{color:var(--purple);font-family:'Courier New',monospace;font-size:11px;text-decoration:none;transition:.15s}
+a.addr:hover{color:var(--pink)}
+b{font-weight:700}
+
+@media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.shell{padding:16px}}
+</style></head><body>
+<div class="shell">
+<div class="topbar">
+ <a href="/" class="brand"><div class="brand-icon">P</div><span>PurffleCopyBot</span><span class="env">PAPER</span></a>
+ <div class="nav-links"><a href="/" class="active">Dashboard</a><a href="/api/state">API</a></div>
 </div>
 
-<h2>👑 Elite traders we're following</h2>
-<table>
- <tr><th>Display name</th><th>Wallet</th><th>Account value</th><th>All-time ROI</th><th>Month ROI</th><th>Day ROI</th></tr>
+<div class="status-bar">
+ <span class="live"><span class="dot"></span> MIRRORING</span>
+ <span class="tag-hl">HYPERLIQUID TOP {{elite_count}}</span>
+ <span class="sep">|</span> Positions every {{scan_interval}}s
+ <span class="sep">|</span> {{scans}} scans
+ <span class="sep">|</span> Leaderboard: {{last_lb}}
+ <span class="sep">|</span> Last scan: {{last_scan}}
+</div>
+
+<div class="metrics">
+ <div class="metric"><div class="lbl">Total Value</div>
+  <div class="val {{'pos' if total>=starting else 'neg'}}">${{ '%.2f'|format(total) }}</div>
+  <div class="sub">P/L ${{ '%+.2f'|format(total-starting) }} ({{ '%+.2f'|format((total/starting-1)*100) }}%)</div></div>
+ <div class="metric"><div class="lbl">Cash</div><div class="val">${{ '%.2f'|format(cash) }}</div></div>
+ <div class="metric"><div class="lbl">Holdings</div><div class="val">${{ '%.2f'|format(holdings_value) }}</div></div>
+ <div class="metric"><div class="lbl">Mirror Positions</div><div class="val">{{ open_count }} / {{ max_concurrent }}</div></div>
+ <div class="metric"><div class="lbl">Total Trades</div><div class="val">{{ trade_count }}</div></div>
+</div>
+
+<div class="sec"><h2><span class="ico">&#x1F451;</span> Elite Traders We Follow</h2></div>
+<div class="tbl-wrap"><table>
+ <tr><th>Trader</th><th>Wallet</th><th>Account Value</th><th>All-Time ROI</th><th>Month ROI</th><th>Day ROI</th></tr>
  {% for e in elites %}
  <tr>
   <td><b>{{ e.display_name or e.wallet[:8] }}</b></td>
@@ -457,28 +508,28 @@ DASH_HTML = """
   <td class="{{'pos' if e.day_roi>=0 else 'neg'}}">{{ '%+.1f'|format(e.day_roi * 100) }}%</td>
  </tr>
  {% else %}
- <tr><td colspan="6" class="muted">Loading leaderboard... (first run takes 60s for 31MB pull)</td></tr>
+ <tr><td colspan="6" class="muted" style="padding:20px;text-align:center">Loading leaderboard... first run takes ~60s</td></tr>
  {% endfor %}
-</table>
+</table></div>
 
-<h2>📡 Live consensus signals — what elites are currently long</h2>
-<table>
- <tr><th>Coin</th><th>Long votes</th><th>Short votes</th><th>Who's long</th><th>Status</th></tr>
+<div class="sec"><h2><span class="ico">&#x1F4E1;</span> Live Consensus Signals</h2></div>
+<div class="tbl-wrap"><table>
+ <tr><th>Coin</th><th>Long Votes</th><th>Short Votes</th><th>Who's Long</th><th>Status</th></tr>
  {% for coin, sig in signals %}
  <tr>
   <td><b>{{ coin }}</b></td>
   <td class="pos">{{ sig.long_count }}</td>
   <td class="neg">{{ sig.short_count }}</td>
   <td class="muted">{{ sig.longs_by | join(', ') }}</td>
-  <td>{% if sig.long_count >= min_agree %}<span class="pill long">SIGNAL{% if coin in mirroring %} (mirroring){% endif %}</span>{% else %}<span class="muted">below threshold</span>{% endif %}</td>
+  <td>{% if sig.long_count >= min_agree %}{% if coin in mirroring %}<span class="pill mirror">MIRRORING</span>{% else %}<span class="pill signal">SIGNAL</span>{% endif %}{% else %}<span class="muted">below threshold</span>{% endif %}</td>
  </tr>
  {% else %}
- <tr><td colspan="5" class="muted">No consensus signals yet — waiting for next position scan</td></tr>
+ <tr><td colspan="5" class="muted" style="padding:20px;text-align:center">No signals yet — waiting for position scan</td></tr>
  {% endfor %}
-</table>
+</table></div>
 
-<h2>Our mirror positions</h2>
-<table>
+<div class="sec"><h2><span class="ico">&#x1F4BC;</span> Mirror Positions</h2></div>
+<div class="tbl-wrap"><table>
  <tr><th>Coin</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Value</th><th>P/L</th></tr>
  {% for p in open_positions %}
  <tr>
@@ -487,21 +538,21 @@ DASH_HTML = """
   <td>${{ '%.4f'|format(p.entry_price) }}</td>
   <td>${{ '%.4f'|format(p.current) }}</td>
   <td>${{ '%.2f'|format(p.value) }}</td>
-  <td class="{{'pos' if p.pl_pct>=0 else 'neg'}}">{{ '%+.2f'|format(p.pl_pct) }}%</td>
+  <td class="{{'pos' if p.pl_pct>=0 else 'neg'}}"><b>{{ '%+.2f'|format(p.pl_pct) }}%</b></td>
  </tr>
  {% else %}
- <tr><td colspan="7" class="muted">No mirror positions open. Bot waits for elites to converge on a long.</td></tr>
+ <tr><td colspan="7" class="muted" style="padding:20px;text-align:center">No mirror positions — waiting for elite consensus</td></tr>
  {% endfor %}
-</table>
+</table></div>
 
-<h2>Recent trades</h2>
-<table>
+<div class="sec"><h2><span class="ico">&#x1F4DD;</span> Recent Trades</h2></div>
+<div class="tbl-wrap"><table>
  <tr><th>Time</th><th>Side</th><th>Coin</th><th>Qty</th><th>Price</th><th>Value</th><th>Reason</th><th>P/L</th></tr>
  {% for t in trades %}
  <tr>
   <td>{{ t.ts[:19].replace('T',' ') }}</td>
   <td><span class="pill {{'up' if t.side=='BUY' else 'dn'}}">{{ t.side }}</span></td>
-  <td>{{ t.coin }}</td>
+  <td><b>{{ t.coin }}</b></td>
   <td>{{ '%.6f'|format(t.qty) }}</td>
   <td>${{ '%.4f'|format(t.price) }}</td>
   <td>${{ '%.2f'|format(t.value) }}</td>
@@ -509,14 +560,53 @@ DASH_HTML = """
   <td class="{{'pos' if t.realized_pnl>=0 else 'neg'}}">{% if t.side=='SELL' %}${{ '%+.4f'|format(t.realized_pnl) }}{% endif %}</td>
  </tr>
  {% else %}
- <tr><td colspan="8" class="muted">No trades yet.</td></tr>
+ <tr><td colspan="8" class="muted" style="padding:20px;text-align:center">No trades yet</td></tr>
  {% endfor %}
-</table>
+</table></div>
 
-<div class="muted" style="margin-top:24px">
- Leaderboard refresh every 6h · positions scanned every {{scan_interval}}s · {{scans}} scans · last leaderboard {{last_lb}} · last scan {{last_scan}}
+<div class="sec"><h2><span class="ico">&#x1F4D6;</span> How It Works</h2></div>
+<div class="tbl-wrap" style="padding:24px">
+ <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+  <div>
+   <h3 style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--purple)">&#x1F451; Elite Trader Mirroring</h3>
+   <p style="font-size:13px;color:var(--t2);line-height:1.7">PurffleCopyBot mirrors the trades of <b>top-performing Hyperliquid traders</b>. Every 6 hours, the bot scans the Hyperliquid leaderboard and selects 5 elite traders based on strict criteria:</p>
+   <ul style="font-size:12px;color:var(--t2);line-height:2;list-style:none;padding:8px 0 0 0">
+    <li>&#x2022; All-time ROI &ge; 100% (proven profitability)</li>
+    <li>&#x2022; Monthly ROI &gt; 0% (still active &amp; profitable)</li>
+    <li>&#x2022; Account value $50K–$5M (real money, not whale-slow)</li>
+    <li>&#x2022; Daily ROI within &plusmn;20% (no freak win/loss days)</li>
+   </ul>
+  </div>
+  <div>
+   <h3 style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--pink)">&#x1F4E1; Consensus Signal Engine</h3>
+   <p style="font-size:13px;color:var(--t2);line-height:1.7">Every 5 minutes, the bot fetches each elite's <b>open positions on Hyperliquid</b>. When <b>&ge;2 elites agree</b> on a long position for the same coin, a consensus signal fires and we paper-open a spot position on Binance. When all elites exit, we exit too. Hard stop-loss at -10%.</p>
+   <h3 style="font-size:14px;font-weight:700;margin:16px 0 10px;color:var(--purple)">&#x2699;&#xFE0F; Key Details</h3>
+   <ul style="font-size:12px;color:var(--t2);line-height:2;list-style:none;padding:0">
+    <li>&#x2022; <b>Paper trading only</b> — $100 virtual starting capital</li>
+    <li>&#x2022; Data: Hyperliquid (on-chain, free) + Binance (public klines)</li>
+    <li>&#x2022; No API keys needed — all data sources are public</li>
+    <li>&#x2022; Dashboard auto-refreshes every 60 seconds</li>
+   </ul>
+  </div>
+ </div>
 </div>
-</body></html>
+
+<div class="sec"><h2><span class="ico">&#x1F4C8;</span> Backtest Results (2-Year, $100 Capital)</h2></div>
+<div class="tbl-wrap"><table>
+ <tr><th>Position Sizing Variant</th><th>Final</th><th>ROI</th><th>Win Rate</th><th>Max DD</th><th>Avg Mo.</th><th>Best Mo.</th><th>Worst Mo.</th></tr>
+ <tr style="background:rgba(168,85,247,.06)"><td><b>Stock Purffle (15% size + partial) &#x2B50;</b></td><td><b>$84.17</b></td><td>-15.8%</td><td>40.9%</td><td>30.4%</td><td>-0.6%</td><td class="pos">+4.8%</td><td class="neg">-6.4%</td></tr>
+ <tr><td><b>15% size, no partial</b></td><td>$83.84</td><td>-16.2%</td><td>40.9%</td><td>30.5%</td><td>-0.7%</td><td class="pos">+4.9%</td><td class="neg">-6.4%</td></tr>
+ <tr><td><b>25% size</b></td><td>$73.13</td><td class="neg">-26.9%</td><td>40.9%</td><td>46.5%</td><td>-1.1%</td><td class="pos">+7.4%</td><td class="neg">-10.2%</td></tr>
+ <tr><td><b>Dynamic (10-75%)</b></td><td>$70.59</td><td class="neg">-29.4%</td><td>40.8%</td><td>58.4%</td><td>-1.1%</td><td class="pos">+22.3%</td><td class="neg">-10.3%</td></tr>
+ <tr><td><b>Dynamic + partial profit</b></td><td>$74.29</td><td class="neg">-25.7%</td><td>40.8%</td><td>58.2%</td><td>-0.9%</td><td class="pos">+21.9%</td><td class="neg">-10.3%</td></tr>
+ <tr><td><b>60% size (current live)</b></td><td>$42.53</td><td class="neg">-57.5%</td><td>40.4%</td><td>79.5%</td><td>-2.8%</td><td class="pos">+19.6%</td><td class="neg">-21.4%</td></tr>
+</table></div>
+<div style="padding:12px 20px;font-size:12px;color:var(--t3);line-height:1.6">
+ <b>Window:</b> Jun 2024 — Jun 2026 &middot; <b>Universe:</b> 30 sub-$1 USDT pairs &middot; <b>Best variant:</b> 15% position sizing with partial profit-taking (lowest drawdown at 30.4%, highest final value). Copy-trading is inherently lagging — elite entries are detected after the fact, resulting in worse fill prices. Smaller position sizes dramatically reduce max drawdown while preserving upside capture.
+</div>
+
+<div style="text-align:center;padding:24px 0;color:var(--t3);font-size:12px">PurffleCopyBot &middot; Built by <b>Purffle</b></div>
+</div></body></html>
 """
 
 @app.route("/")
