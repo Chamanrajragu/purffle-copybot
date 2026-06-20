@@ -561,8 +561,24 @@ b{font-weight:700}
 .ctrl-btn{font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;padding:7px 14px;border-radius:8px;border:1px solid var(--bd);background:var(--s2);color:var(--t1);transition:.15s}
 .ctrl-btn:hover{border-color:var(--purple)}
 .ctrl-btn.paused{color:var(--pink);border-color:rgba(236,72,153,.4)}
+/* Allocation breakdown */
+.alloc-bar{display:flex;height:18px;border-radius:9px;overflow:hidden;margin-bottom:12px;background:var(--s2)}
+.alloc-seg{height:100%;transition:width .4s ease}
+.alloc-legend{display:flex;flex-wrap:wrap;gap:8px 16px}
+.alloc-item{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--t2)}
+.alloc-dot{width:10px;height:10px;border-radius:3px;flex-shrink:0}
 
-@media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.shell{padding:16px}.statgrid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){
+ .metrics{grid-template-columns:repeat(2,1fr)}
+ .shell{padding:16px}
+ .statgrid{grid-template-columns:repeat(2,1fr)}
+ .topbar{flex-wrap:wrap;gap:12px}
+ .nav-links{flex-wrap:wrap}
+ .status-bar{flex-wrap:wrap;gap:8px}
+ .tbl-wrap{overflow-x:auto}
+ table{min-width:560px}
+}
+@media(max-width:560px){.metrics{grid-template-columns:1fr 1fr}.statgrid{grid-template-columns:1fr 1fr}.metric .val{font-size:22px}}
 </style></head><body>
 <div class="shell">
 <div class="topbar">
@@ -593,6 +609,21 @@ b{font-weight:700}
  <div class="metric"><div class="lbl">Holdings</div><div class="val">${{ '%.2f'|format(holdings_value) }}</div></div>
  <div class="metric"><div class="lbl">Mirror Positions</div><div class="val">{{ open_count }} / {{ max_concurrent }}</div></div>
  <div class="metric"><div class="lbl">Total Trades</div><div class="val">{{ trade_count }}</div></div>
+</div>
+
+{% set palette = ['#a855f7','#ec4899','#3b82f6','#14b8a6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#eab308'] %}
+<div class="sec"><h2><span class="ico">&#x1F9FE;</span> Portfolio Allocation</h2></div>
+<div class="tbl-wrap" style="padding:18px 16px">
+ {% if allocation %}
+ <div class="alloc-bar">
+  {% for a in allocation %}<div class="alloc-seg" style="width:{{ '%.3f'|format(a.pct) }}%;background:{{ palette[loop.index0 % palette|length] }}" title="{{ a.label }} {{ '%.1f'|format(a.pct) }}%"></div>{% endfor %}
+ </div>
+ <div class="alloc-legend">
+  {% for a in allocation %}<span class="alloc-item"><span class="alloc-dot" style="background:{{ palette[loop.index0 % palette|length] }}"></span>{{ a.label }} <b style="color:var(--t1)">{{ '%.1f'|format(a.pct) }}%</b> <span class="muted">${{ '%.2f'|format(a.value) }}</span></span>{% endfor %}
+ </div>
+ {% else %}
+ <div class="muted" style="text-align:center;padding:8px">All in cash — no mirror positions yet.</div>
+ {% endif %}
 </div>
 
 <div class="sec"><h2><span class="ico">&#x1F4C8;</span> Equity Curve <span class="muted" style="font-weight:600">{{ equity.count }} snapshots</span></h2></div>
@@ -834,6 +865,15 @@ def dashboard():
         ).fetchall()]
         stats = compute_trade_stats(conn)
     equity = build_equity_sparkline(equity_series)
+    # Portfolio allocation breakdown (cash + each mirror holding as a share of total).
+    total_value = cash + holdings_value
+    allocation = []
+    if total_value > 0:
+        allocation.append({"label": "Cash", "value": cash, "pct": cash / total_value * 100})
+        for p in open_positions:
+            allocation.append({"label": p["coin"], "value": p["value"],
+                               "pct": p["value"] / total_value * 100})
+    allocation.sort(key=lambda a: -a["value"])
     # Sort signals by long count desc
     sig_sorted = sorted(signals.items(), key=lambda x: -x[1].get("long_count", 0))[:15]
 
@@ -855,7 +895,7 @@ def dashboard():
         min_acct=MIN_ACCOUNT_VALUE, max_acct=MAX_ACCOUNT_VALUE,
         max_day_pct=MAX_DAY_ROI_ABS * 100, position_size_pct=POSITION_SIZE_PCT,
         hard_stop_pct=HARD_STOP_PCT, equity=equity,
-        stats=stats, paused=_state["paused"],
+        stats=stats, paused=_state["paused"], allocation=allocation,
     )
 
 
