@@ -32,6 +32,8 @@ Dashboard: http://localhost:12349
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import sqlite3
@@ -43,7 +45,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request, Response
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,12 @@ def init_db() -> None:
                 day_roi REAL NOT NULL,
                 added_ts TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS snapshots (
+                ts TEXT PRIMARY KEY,
+                cash REAL NOT NULL,
+                holdings_value REAL NOT NULL,
+                total_value REAL NOT NULL
+            );
         """)
         if not conn.execute("SELECT 1 FROM state WHERE key='cash'").fetchone():
             conn.execute("INSERT INTO state(key,value) VALUES('cash',?)", (str(STARTING_CAPITAL),))
@@ -182,6 +190,69 @@ def record_trade(coin: str, symbol: str, side: str, qty: float, price: float,
             (ts, coin, symbol, side, qty, price, qty * price, fee, realized_pnl, reason),
         )
     log(f"{side} {qty:.6f} {coin} @ ${price:.4f} fee ${fee:.4f} pnl ${realized_pnl:+.4f} ({reason})")
+
+def take_snapshot(cash: float, holdings_value: float) -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshots(ts,cash,holdings_value,total_value) VALUES(?,?,?,?)",
+            (ts, cash, holdings_value, cash + holdings_value),
+        )
+
+
+def build_equity_sparkline(series: list[float], w: int = 1180, h: int = 130,
+                           pad: int = 10) -> dict:
+    """Turn a list of total-value snapshots into SVG polyline/area point strings."""
+    if len(series) < 2:
+        return {"has": False, "count": len(series)}
+    lo, hi = min(series), max(series)
+    rng = (hi - lo) or 1.0
+    n = len(series)
+    pts = []
+    for i, v in enumerate(series):
+        x = pad + (w - 2 * pad) * (i / (n - 1))
+        y = pad + (h - 2 * pad) * (1 - (v - lo) / rng)
+        pts.append(f"{x:.1f},{y:.1f}")
+    points = " ".join(pts)
+    x0 = f"{pad:.1f}"
+    x1 = f"{pad + (w - 2 * pad):.1f}"
+    baseline = f"{h - pad:.1f}"
+    area = f"{x0},{baseline} {points} {x1},{baseline}"
+    return {
+        "has": True, "count": n, "points": points, "area": area,
+        "up": series[-1] >= series[0], "first": series[0], "last": series[-1],
+        "min": lo, "max": hi,
+    }
+
+
+def compute_trade_stats(conn) -> dict:
+    """Aggregate realized P/L of closed (SELL) trades into headline performance stats."""
+    rows = conn.execute("SELECT realized_pnl, fee FROM trades").fetchall()
+    total_fees = sum((r["fee"] or 0.0) for r in rows)
+    pnls = [r["realized_pnl"] or 0.0
+            for r in conn.execute("SELECT realized_pnl FROM trades WHERE side='SELL'").fetchall()]
+    closed = len(pnls)
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
+    gross_profit = sum(wins)
+    gross_loss = -sum(losses)
+    if gross_loss > 0:
+        pf_display = f"{gross_profit / gross_loss:.2f}"
+    elif gross_profit > 0:
+        pf_display = "∞"
+    else:
+        pf_display = "—"
+    return {
+        "closed": closed, "wins": len(wins), "losses": len(losses),
+        "win_rate": (len(wins) / closed * 100) if closed else None,
+        "avg_win": (gross_profit / len(wins)) if wins else 0.0,
+        "avg_loss": (-gross_loss / len(losses)) if losses else 0.0,
+        "best": max(pnls) if pnls else 0.0,
+        "worst": min(pnls) if pnls else 0.0,
+        "profit_factor": pf_display,
+        "net": sum(pnls), "total_fees": total_fees,
+    }
+
 
 def save_elite_traders(traders: list[dict]) -> None:
     with db() as conn:
@@ -300,9 +371,11 @@ def fetch_binance_price(symbol: str) -> Optional[float]:
 # Aggregation + execution
 # ---------------------------------------------------------------------------
 _state = {
-    "running": False, "last_leaderboard_refresh": 0.0, "last_position_scan": 0.0,
+    "running": False, "paused": False,
+    "last_leaderboard_refresh": 0.0, "last_position_scan": 0.0,
     "elites": [], "current_signals": {},  # coin -> {long_count, short_count, traders}
     "scans": 0,
+    "last_prices": {},  # symbol -> last spot price seen by the scanner (dashboard reuses this)
 }
 
 
@@ -335,6 +408,7 @@ def scan_and_mirror() -> None:
         symbol = pos["symbol"]
         live_price = fetch_binance_price(symbol)
         if live_price is None: continue
+        _state["last_prices"][symbol] = live_price
         from_entry = (live_price - pos["entry_price"]) / pos["entry_price"]
 
         exit_reason = None
@@ -364,6 +438,7 @@ def scan_and_mirror() -> None:
         if live_price is None or live_price <= 0:
             log(f"signal on {coin}: {sig['long_count']} elites long, but no Binance USDT pair")
             continue
+        _state["last_prices"][symbol] = live_price
         spend = cash * POSITION_SIZE_PCT
         if spend < 5: break
         fee = spend * SPOT_FEE
@@ -378,6 +453,13 @@ def scan_and_mirror() -> None:
         our_positions[coin] = {"coin": coin, "symbol": symbol, "qty": qty,
                                 "entry_price": live_price, "cost": cost}
 
+    # Record an equity snapshot for the dashboard's equity curve.
+    holdings_value = 0.0
+    for c, pos in get_positions().items():
+        px = _state["last_prices"].get(pos["symbol"], pos["entry_price"])
+        holdings_value += pos["qty"] * px
+    take_snapshot(get_cash(), holdings_value)
+
     _state["scans"] += 1
     _state["last_position_scan"] = time.time()
 
@@ -386,15 +468,16 @@ def scanner_loop() -> None:
     _state["running"] = True
     while True:
         try:
-            now = time.time()
-            if now - _state["last_leaderboard_refresh"] > LEADERBOARD_REFRESH_SECONDS \
-               or not _state["elites"]:
-                elites = fetch_leaderboard()
-                if elites:
-                    _state["elites"] = elites
-                    save_elite_traders(elites)
-                    _state["last_leaderboard_refresh"] = now
-            scan_and_mirror()
+            if not _state["paused"]:
+                now = time.time()
+                if now - _state["last_leaderboard_refresh"] > LEADERBOARD_REFRESH_SECONDS \
+                   or not _state["elites"]:
+                    elites = fetch_leaderboard()
+                    if elites:
+                        _state["elites"] = elites
+                        save_elite_traders(elites)
+                        _state["last_leaderboard_refresh"] = now
+                scan_and_mirror()
         except Exception as e:
             log(f"scanner error: {e}")
         time.sleep(POSITION_SCAN_SECONDS)
@@ -408,7 +491,7 @@ app = Flask(__name__)
 DASH_HTML = """
 <!doctype html>
 <html><head><title>PurffleCopyBot — Dashboard</title>
-<meta http-equiv="refresh" content="60">
+<noscript><meta http-equiv="refresh" content="60"></noscript>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -417,6 +500,7 @@ DASH_HTML = """
 --grad:linear-gradient(135deg,#a855f7,#ec4899)}
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh}
 .shell{max-width:1280px;margin:0 auto;padding:24px 32px}
+#live{transition:opacity .2s ease}
 
 .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--bd)}
 .brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--t1)}
@@ -468,16 +552,32 @@ a.addr{color:var(--purple);font-family:'Courier New',monospace;font-size:11px;te
 a.addr:hover{color:var(--pink)}
 b{font-weight:700}
 
-@media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.shell{padding:16px}}
+/* Stats panel */
+.statgrid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:8px}
+.statcard{background:var(--s1);border:1px solid var(--bd);border-radius:12px;padding:14px 16px}
+.statcard .l{font-size:10px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.statcard .v{font-size:18px;font-weight:800;letter-spacing:-.01em}
+/* Controls */
+.ctrl-btn{font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;padding:7px 14px;border-radius:8px;border:1px solid var(--bd);background:var(--s2);color:var(--t1);transition:.15s}
+.ctrl-btn:hover{border-color:var(--purple)}
+.ctrl-btn.paused{color:var(--pink);border-color:rgba(236,72,153,.4)}
+
+@media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.shell{padding:16px}.statgrid{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <div class="shell">
 <div class="topbar">
  <a href="/" class="brand"><div class="brand-icon">P</div><span>PurffleCopyBot</span><span class="env">PAPER</span></a>
- <div class="nav-links"><a href="/" class="active">Dashboard</a><a href="/api/state">API</a></div>
+ <div class="nav-links">
+   <a href="/" class="active">Dashboard</a>
+   <a href="/export/trades.csv">&#x2B07; CSV</a>
+   <a href="/api/state">API</a>
+   <button type="button" id="pauseBtn" class="ctrl-btn {{ 'paused' if paused else '' }}">{{ '▶ Resume' if paused else '⏸ Pause' }}</button>
+ </div>
 </div>
 
+<div id="live">
 <div class="status-bar">
- <span class="live"><span class="dot"></span> MIRRORING</span>
+ <span class="live" style="{{ 'color:var(--pink)' if paused else '' }}"><span class="dot"></span> {{ 'PAUSED' if paused else 'MIRRORING' }}</span>
  <span class="tag-hl">HYPERLIQUID TOP {{elite_count}}</span>
  <span class="sep">|</span> Positions every {{scan_interval}}s
  <span class="sep">|</span> {{scans}} scans
@@ -487,12 +587,43 @@ b{font-weight:700}
 
 <div class="metrics">
  <div class="metric"><div class="lbl">Total Value</div>
-  <div class="val {{'pos' if total>=starting else 'neg'}}">${{ '%.2f'|format(total) }}</div>
+  <div class="val {{'pos' if total>=starting else 'neg'}}" id="mTotal" data-v="{{ total }}">${{ '%.2f'|format(total) }}</div>
   <div class="sub">P/L ${{ '%+.2f'|format(total-starting) }} ({{ '%+.2f'|format((total/starting-1)*100) }}%)</div></div>
  <div class="metric"><div class="lbl">Cash</div><div class="val">${{ '%.2f'|format(cash) }}</div></div>
  <div class="metric"><div class="lbl">Holdings</div><div class="val">${{ '%.2f'|format(holdings_value) }}</div></div>
  <div class="metric"><div class="lbl">Mirror Positions</div><div class="val">{{ open_count }} / {{ max_concurrent }}</div></div>
  <div class="metric"><div class="lbl">Total Trades</div><div class="val">{{ trade_count }}</div></div>
+</div>
+
+<div class="sec"><h2><span class="ico">&#x1F4C8;</span> Equity Curve <span class="muted" style="font-weight:600">{{ equity.count }} snapshots</span></h2></div>
+<div class="tbl-wrap" style="padding:18px 16px 12px">
+ {% if equity.has %}
+ <svg viewBox="0 0 1180 130" preserveAspectRatio="none" style="width:100%;height:130px;display:block">
+  <defs><linearGradient id="eg" x1="0" y1="0" x2="0" y2="1">
+   <stop offset="0%" stop-color="{{ '#22c55e' if equity.up else '#ef4444' }}" stop-opacity="0.28"/>
+   <stop offset="100%" stop-color="{{ '#22c55e' if equity.up else '#ef4444' }}" stop-opacity="0"/>
+  </linearGradient></defs>
+  <polygon fill="url(#eg)" points="{{ equity.area }}"/>
+  <polyline fill="none" stroke="{{ '#22c55e' if equity.up else '#ef4444' }}" stroke-width="2" stroke-linejoin="round" points="{{ equity.points }}"/>
+ </svg>
+ <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--t3);margin-top:8px">
+  <span>Start ${{ '%.2f'|format(equity.first) }}</span>
+  <span>Low ${{ '%.2f'|format(equity.min) }} &middot; High ${{ '%.2f'|format(equity.max) }}</span>
+  <span class="{{ 'pos' if equity.up else 'neg' }}">Now ${{ '%.2f'|format(equity.last) }}</span>
+ </div>
+ {% else %}
+ <div class="muted" style="text-align:center;padding:18px">Equity curve will appear after a few scan cycles record snapshots.</div>
+ {% endif %}
+</div>
+
+<div class="sec"><h2><span class="ico">&#x1F4CA;</span> Performance <span class="muted" style="font-weight:600">{{ stats.closed }} closed trades</span></h2></div>
+<div class="statgrid">
+ <div class="statcard"><div class="l">Win Rate</div><div class="v {{ 'pos' if stats.win_rate is not none and stats.win_rate>=50 else '' }}">{% if stats.win_rate is not none %}{{ '%.1f'|format(stats.win_rate) }}%{% else %}—{% endif %}</div></div>
+ <div class="statcard"><div class="l">Profit Factor</div><div class="v">{{ stats.profit_factor }}</div></div>
+ <div class="statcard"><div class="l">Net Realized</div><div class="v {{ 'pos' if stats.net>=0 else 'neg' }}">${{ '%+.2f'|format(stats.net) }}</div></div>
+ <div class="statcard"><div class="l">Avg Win</div><div class="v pos">${{ '%+.4f'|format(stats.avg_win) }}</div></div>
+ <div class="statcard"><div class="l">Avg Loss</div><div class="v neg">${{ '%+.4f'|format(stats.avg_loss) }}</div></div>
+ <div class="statcard"><div class="l">Total Fees</div><div class="v">${{ '%.4f'|format(stats.total_fees) }}</div></div>
 </div>
 
 <div class="sec"><h2><span class="ico">&#x1F451;</span> Elite Traders We Follow</h2></div>
@@ -563,23 +694,24 @@ b{font-weight:700}
  <tr><td colspan="8" class="muted" style="padding:20px;text-align:center">No trades yet</td></tr>
  {% endfor %}
 </table></div>
+</div><!-- /#live -->
 
 <div class="sec"><h2><span class="ico">&#x1F4D6;</span> How It Works</h2></div>
 <div class="tbl-wrap" style="padding:24px">
  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
   <div>
    <h3 style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--purple)">&#x1F451; Elite Trader Mirroring</h3>
-   <p style="font-size:13px;color:var(--t2);line-height:1.7">PurffleCopyBot mirrors the trades of <b>top-performing Hyperliquid traders</b>. Every 6 hours, the bot scans the Hyperliquid leaderboard and selects 5 elite traders based on strict criteria:</p>
+   <p style="font-size:13px;color:var(--t2);line-height:1.7">PurffleCopyBot mirrors the trades of <b>top-performing Hyperliquid traders</b>. Every 6 hours, the bot scans the Hyperliquid leaderboard and selects {{top_count}} elite traders based on strict criteria:</p>
    <ul style="font-size:12px;color:var(--t2);line-height:2;list-style:none;padding:8px 0 0 0">
-    <li>&#x2022; All-time ROI &ge; 100% (proven profitability)</li>
-    <li>&#x2022; Monthly ROI &gt; 0% (still active &amp; profitable)</li>
-    <li>&#x2022; Account value $50K–$5M (real money, not whale-slow)</li>
-    <li>&#x2022; Daily ROI within &plusmn;20% (no freak win/loss days)</li>
+    <li>&#x2022; All-time ROI &ge; {{ '%.0f'|format(min_all_roi_pct) }}% (proven profitability)</li>
+    <li>&#x2022; Monthly ROI &ge; {{ '%.0f'|format(min_month_roi_pct) }}% (actively making money now)</li>
+    <li>&#x2022; Account value ${{ '%.0f'|format(min_acct/1000) }}K–${{ '%.0f'|format(max_acct/1000000) }}M (real money, not whale-slow)</li>
+    <li>&#x2022; Daily ROI within &plusmn;{{ '%.0f'|format(max_day_pct) }}% (no freak win/loss days)</li>
    </ul>
   </div>
   <div>
    <h3 style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--pink)">&#x1F4E1; Consensus Signal Engine</h3>
-   <p style="font-size:13px;color:var(--t2);line-height:1.7">Every 5 minutes, the bot fetches each elite's <b>open positions on Hyperliquid</b>. When <b>&ge;2 elites agree</b> on a long position for the same coin, a consensus signal fires and we paper-open a spot position on Binance. When all elites exit, we exit too. Hard stop-loss at -10%.</p>
+   <p style="font-size:13px;color:var(--t2);line-height:1.7">Every {{ '%.0f'|format(scan_interval/60) }} minutes, the bot fetches each elite's <b>open positions on Hyperliquid</b>. When <b>&ge;{{min_agree}} elites agree</b> on a long position for the same coin, a consensus signal fires and we paper-open a spot position on Binance ({{ '%.0f'|format(position_size_pct*100) }}% of cash). When elites drop below the threshold we exit too. Hard stop-loss at -{{ '%.0f'|format(hard_stop_pct*100) }}%.</p>
    <h3 style="font-size:14px;font-weight:700;margin:16px 0 10px;color:var(--purple)">&#x2699;&#xFE0F; Key Details</h3>
    <ul style="font-size:12px;color:var(--t2);line-height:2;list-style:none;padding:0">
     <li>&#x2022; <b>Paper trading only</b> — $100 virtual starting capital</li>
@@ -599,14 +731,68 @@ b{font-weight:700}
  <tr><td><b>25% size</b></td><td>$73.13</td><td class="neg">-26.9%</td><td>40.9%</td><td>46.5%</td><td>-1.1%</td><td class="pos">+7.4%</td><td class="neg">-10.2%</td></tr>
  <tr><td><b>Dynamic (10-75%)</b></td><td>$70.59</td><td class="neg">-29.4%</td><td>40.8%</td><td>58.4%</td><td>-1.1%</td><td class="pos">+22.3%</td><td class="neg">-10.3%</td></tr>
  <tr><td><b>Dynamic + partial profit</b></td><td>$74.29</td><td class="neg">-25.7%</td><td>40.8%</td><td>58.2%</td><td>-0.9%</td><td class="pos">+21.9%</td><td class="neg">-10.3%</td></tr>
- <tr><td><b>60% size (current live)</b></td><td>$42.53</td><td class="neg">-57.5%</td><td>40.4%</td><td>79.5%</td><td>-2.8%</td><td class="pos">+19.6%</td><td class="neg">-21.4%</td></tr>
+ <tr><td><b>60% size (aggressive)</b></td><td>$42.53</td><td class="neg">-57.5%</td><td>40.4%</td><td>79.5%</td><td>-2.8%</td><td class="pos">+19.6%</td><td class="neg">-21.4%</td></tr>
 </table></div>
 <div style="padding:12px 20px;font-size:12px;color:var(--t3);line-height:1.6">
  <b>Window:</b> Jun 2024 — Jun 2026 &middot; <b>Universe:</b> 30 sub-$1 USDT pairs &middot; <b>Best variant:</b> 15% position sizing with partial profit-taking (lowest drawdown at 30.4%, highest final value). Copy-trading is inherently lagging — elite entries are detected after the fact, resulting in worse fill prices. Smaller position sizes dramatically reduce max drawdown while preserving upside capture.
 </div>
 
 <div style="text-align:center;padding:24px 0;color:var(--t3);font-size:12px">PurffleCopyBot &middot; Built by <b>Purffle</b></div>
-</div></body></html>
+</div>
+<script>
+(function(){
+  // Pause / resume control (button lives in the static topbar so it survives live swaps).
+  var pauseBtn = document.getElementById('pauseBtn');
+  if (pauseBtn && window.fetch) {
+    pauseBtn.addEventListener('click', function(){
+      fetch('/api/control', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                             body:'action=toggle'})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          var paused = !!d.paused;
+          pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+          pauseBtn.classList.toggle('paused', paused);
+        }).catch(function(){});
+    });
+  }
+
+  var live = document.getElementById('live');
+  if (!live || !window.fetch) return;          // no-JS: <noscript> meta-refresh takes over
+  var INTERVAL = 15000;
+  function animateValue(el, from, to, dur){
+    var start = performance.now();
+    function frame(now){
+      var t = Math.min(1, (now - start) / dur);
+      var v = from + (to - from) * (t * (2 - t)); // ease-out
+      el.textContent = '$' + v.toFixed(2);
+      if (t < 1) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+  function refresh(){
+    fetch(window.location.pathname, {headers: {'X-Requested-With': 'fetch'}})
+      .then(function(r){ return r.text(); })
+      .then(function(txt){
+        var fresh = new DOMParser().parseFromString(txt, 'text/html').getElementById('live');
+        if (!fresh) return;
+        var oldEl = document.getElementById('mTotal');
+        var oldV = oldEl ? parseFloat(oldEl.getAttribute('data-v')) : NaN;
+        live.style.opacity = '0.55';
+        setTimeout(function(){
+          live.innerHTML = fresh.innerHTML;
+          live.style.opacity = '1';
+          var newEl = document.getElementById('mTotal');
+          if (newEl){
+            var newV = parseFloat(newEl.getAttribute('data-v'));
+            if (!isNaN(oldV) && !isNaN(newV) && oldV !== newV) animateValue(newEl, oldV, newV, 700);
+          }
+        }, 160);
+      }).catch(function(){});
+  }
+  setInterval(refresh, INTERVAL);
+})();
+</script>
+</body></html>
 """
 
 @app.route("/")
@@ -618,7 +804,11 @@ def dashboard():
     holdings_value = 0.0
     mirroring = set()
     for coin, p in positions.items():
-        live_price = fetch_binance_price(p["symbol"]) or p["entry_price"]
+        # Reuse the scanner's cached price first; only hit the network if we've never
+        # seen this symbol (keeps the dashboard fast instead of N blocking API calls).
+        live_price = (_state["last_prices"].get(p["symbol"])
+                      or fetch_binance_price(p["symbol"])
+                      or p["entry_price"])
         value = p["qty"] * live_price
         pl_pct = ((live_price / p["entry_price"]) - 1) * 100 if p["entry_price"] else 0
         holdings_value += value
@@ -639,6 +829,11 @@ def dashboard():
         elites = [dict(r) for r in conn.execute(
             "SELECT * FROM elite_traders ORDER BY all_time_roi DESC"
         ).fetchall()]
+        equity_series = [float(r["total_value"]) for r in conn.execute(
+            "SELECT total_value FROM snapshots ORDER BY ts ASC LIMIT 500"
+        ).fetchall()]
+        stats = compute_trade_stats(conn)
+    equity = build_equity_sparkline(equity_series)
     # Sort signals by long count desc
     sig_sorted = sorted(signals.items(), key=lambda x: -x[1].get("long_count", 0))[:15]
 
@@ -655,7 +850,50 @@ def dashboard():
         min_agree=MIN_AGREEING_TRADERS, mirroring=mirroring,
         scan_interval=POSITION_SCAN_SECONDS, scans=_state["scans"],
         last_lb=last_lb_str, last_scan=last_scan_str,
+        top_count=TOP_TRADERS_COUNT,
+        min_all_roi_pct=MIN_ALL_TIME_ROI * 100, min_month_roi_pct=MIN_MONTH_ROI * 100,
+        min_acct=MIN_ACCOUNT_VALUE, max_acct=MAX_ACCOUNT_VALUE,
+        max_day_pct=MAX_DAY_ROI_ABS * 100, position_size_pct=POSITION_SIZE_PCT,
+        hard_stop_pct=HARD_STOP_PCT, equity=equity,
+        stats=stats, paused=_state["paused"],
     )
+
+
+@app.route("/export/trades.csv")
+def export_trades_csv():
+    """Download the full trade log as CSV."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT ts,coin,symbol,side,qty,price,value,fee,reason,realized_pnl "
+            "FROM trades ORDER BY id ASC"
+        ).fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["timestamp", "coin", "symbol", "side", "qty", "price", "value",
+                "fee", "reason", "realized_pnl"])
+    for r in rows:
+        w.writerow([r["ts"], r["coin"], r["symbol"], r["side"], r["qty"], r["price"],
+                    r["value"], r["fee"], r["reason"], r["realized_pnl"]])
+    return Response(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=purfflecopybot_trades.csv"},
+    )
+
+
+@app.route("/api/control", methods=["POST"])
+def api_control():
+    """Pause or resume the background mirror scanner."""
+    action = (request.form.get("action") or request.args.get("action") or "").lower()
+    if action == "pause":
+        _state["paused"] = True
+    elif action == "resume":
+        _state["paused"] = False
+    elif action == "toggle":
+        _state["paused"] = not _state["paused"]
+    else:
+        return jsonify({"error": "action must be pause, resume, or toggle"}), 400
+    log(f"scanner {'paused' if _state['paused'] else 'resumed'} via dashboard")
+    return jsonify({"paused": _state["paused"]})
 
 
 @app.route("/api/state")
